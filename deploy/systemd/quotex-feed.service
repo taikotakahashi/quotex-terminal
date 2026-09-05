@@ -6,6 +6,9 @@
 Description=Quotex feed service
 After=network-online.target redis-server.service
 Wants=network-online.target
+# Start-rate limiting belongs in [Unit] (newer systemd warns if put in [Service]).
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -21,8 +24,6 @@ Environment=PYTHONUNBUFFERED=1
 # Quotex with reconnect storms.
 Restart=always
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
