@@ -1,0 +1,35 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Secrets — never commit credentials
+.env
+backend/.env
+backend/.env.bak
+
+# pyquotex runtime artifacts (session/cookies land in the working directory)
+session.json
+backend/session.json
+settings/
+browser/
+output/
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.env
+
+# Browser capture profiles (contain a logged-in Quotex session — NEVER commit)
+backend/.pw-profile/
+backend/.chrome-capture/
+.chrome-capture/
+.pw-profile/
+
+# Build caches / editor noise
+*.tsbuildinfo
+
+# Redis persistence (local docker volume dir, if used)
+.redis-data/

@@ -1,0 +1,25 @@
+# Quotex web API — serves REST + WebSocket from Redis to the frontend.
+# Install: copy to /etc/systemd/system/, adjust paths/User/CORS, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now quotex-api
+[Unit]
+Description=Quotex web API
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quotex
+Group=quotex
+WorkingDirectory=/opt/quotex
+ExecStart=/opt/quotex/.venv/bin/quotex-api
+Environment=PYTHONUNBUFFERED=1
+Environment=REDIS_URL=redis://localhost:6379/0
+Environment=WEBAPI_HOST=127.0.0.1
+Environment=WEBAPI_PORT=8000
+# Lock CORS to your deployed frontend origin (comma-separated for several).
+Environment=WEBAPI_CORS=https://your-frontend.vercel.app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

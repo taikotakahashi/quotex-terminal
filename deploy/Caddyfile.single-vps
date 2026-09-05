@@ -1,0 +1,26 @@
+# Single-VPS deploy: Caddy serves the built frontend (static) AND proxies the
+# API + WebSocket to quotex-api on the same domain. Automatic HTTPS.
+#
+# Put this at /etc/caddy/Caddyfile (replace the domain, point its DNS A record at
+# the VPS), then: sudo systemctl reload caddy
+#
+#   https://yourdomain.com/          -> frontend/dist (the dashboard)
+#   https://yourdomain.com/api/*     -> 127.0.0.1:8000  (REST)
+#   wss://yourdomain.com/ws          -> 127.0.0.1:8000  (live WebSocket)
+
+yourdomain.com {
+    encode gzip
+
+    # API + WebSocket go to the backend.
+    @backend path /api/* /ws
+    handle @backend {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    # Everything else is the static SPA.
+    handle {
+        root * /opt/quotex/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}

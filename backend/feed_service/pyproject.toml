@@ -1,0 +1,30 @@
+[project]
+name = "quotex-feed-service"
+version = "0.1.0"
+description = "Feed Service: streams Quotex assets, payouts, ticks and candles into Redis."
+requires-python = ">=3.12"
+dependencies = [
+    "pyquotex",            # satisfied by the editable install of ./vendor/pyquotex
+    "redis>=5.0,<6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+quotex-feed = "feed.main:cli"
+
+[build-system]
+requires = ["hatchling>=1.20"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["feed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

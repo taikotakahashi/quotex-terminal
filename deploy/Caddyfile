@@ -1,0 +1,15 @@
+# Caddy reverse proxy for the Quotex API — automatic HTTPS (Let's Encrypt) and
+# transparent WebSocket proxying (needed: the Vercel frontend is HTTPS, so the
+# API must be HTTPS/WSS or the browser blocks it as mixed content).
+#
+# Install Caddy (https://caddyserver.com/docs/install), put this at
+# /etc/caddy/Caddyfile (replace the domain + point its DNS A record at the VPS),
+# then: sudo systemctl reload caddy
+#
+# Result: https://api.yourdomain.com  ->  http://127.0.0.1:8000
+#         wss://api.yourdomain.com/ws ->  the API's WebSocket (handled automatically)
+
+api.yourdomain.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:8000
+}

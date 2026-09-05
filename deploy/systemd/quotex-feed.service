@@ -1,0 +1,28 @@
+# Quotex feed service — streams Quotex -> Redis and computes signals.
+# Install: copy to /etc/systemd/system/, adjust paths/User, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now quotex-feed
+# Logs: journalctl -u quotex-feed -f
+[Unit]
+Description=Quotex feed service
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quotex
+Group=quotex
+# WorkingDirectory MUST be backend/ so it loads backend/.env and finds
+# backend/.chrome-capture (the auto-refresh browser profile).
+WorkingDirectory=/opt/quotex/backend
+ExecStart=/opt/quotex/.venv/bin/quotex-feed
+Environment=PYTHONUNBUFFERED=1
+# The feed self-heals (cools down on throttle, auto-refreshes on expiry), so it
+# rarely exits; Restart is only a backstop. Keep it gentle to avoid hammering
+# Quotex with reconnect storms.
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
