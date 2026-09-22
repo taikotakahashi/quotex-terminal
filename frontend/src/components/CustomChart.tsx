@@ -11,8 +11,8 @@ interface Props {
 
 const THEME = {
   dark: {
-    grid: 'rgba(255,255,255,0.05)', text: '#8890a3',
-    up: '#0fca7f', down: '#f14d5b', tagText: '#06231a', cross: 'rgba(255,255,255,0.25)',
+    grid: 'rgba(148,163,184,0.08)', text: '#64748B',
+    up: '#00E6A8', down: '#FF5364', tagText: '#04120c', cross: 'rgba(148,163,184,0.28)',
   },
   light: {
     grid: 'rgba(16,24,40,0.07)', text: '#5a6a79',
@@ -226,7 +226,7 @@ export function CustomChart({ candles, liveCandle, viewKey }: Props) {
         // Price tag on the axis.
         const cp = fmt(priceAt(hov.y))
         const cw = ctx.measureText(cp).width
-        ctx.fillStyle = themeRef.current === 'dark' ? '#2a2f3e' : '#33465a'
+        ctx.fillStyle = themeRef.current === 'dark' ? '#102036' : '#33465a'
         ctx.beginPath(); ctx.roundRect(padL + plotW + 2, hov.y - 9, cw + 10, 18, 3); ctx.fill()
         ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
         ctx.fillText(cp, padL + plotW + 7, hov.y + 0.5)

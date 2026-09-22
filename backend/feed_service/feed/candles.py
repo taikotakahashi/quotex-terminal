@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from .aggregator import CandleAggregator
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.5
-RESUBSCRIBE_BACKOFF = 10
+RESUBSCRIBE_BACKOFF = 5
+# If Quotex's WS reconnects under us, ticks stop until we re-subscribe.
+NO_TICK_RESUBSCRIBE_SEC = 45
 
 
 class CandleStreamer:
@@ -30,7 +33,7 @@ class CandleStreamer:
     async def run(self) -> None:
         while True:
             try:
-                await self.client.subscribe_asset(self.asset)
+                await self.client.subscribe_asset(self.asset, force=True)
                 logger.info("[%s] subscribed", self.asset)
                 await self._consume_loop()
             except asyncio.CancelledError:
@@ -43,13 +46,24 @@ class CandleStreamer:
                 await asyncio.sleep(RESUBSCRIBE_BACKOFF)
 
     async def _consume_loop(self) -> None:
+        last_data = time.monotonic()
         while True:
             ticks = await self.client.get_ticks(self.asset)
             fresh = [t for t in ticks if t.get("time", 0) > self._last_tick_ts]
 
             if fresh:
+                last_data = time.monotonic()
                 self._last_tick_ts = fresh[-1]["time"]
                 await self._process(fresh)
+            elif time.monotonic() - last_data >= NO_TICK_RESUBSCRIBE_SEC:
+                # Typical after an internal WS reconnect: socket is "up" but
+                # this asset's stream was dropped. Exit so run() re-subscribes.
+                logger.warning(
+                    "[%s] no ticks for %ss — forcing re-subscribe",
+                    self.asset, NO_TICK_RESUBSCRIBE_SEC,
+                )
+                self.client.forget_subscription(self.asset)
+                return
 
             await asyncio.sleep(POLL_INTERVAL)
 

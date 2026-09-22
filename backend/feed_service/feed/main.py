@@ -11,19 +11,35 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 from dotenv import find_dotenv
 
 from .candles import CandleStreamer
 from .config import Settings, read_env_session
-from .health import Health, heartbeat_loop, serve_http
+from .health import (
+    Health,
+    MIN_STALL_RECONNECT_GAP_SEC,
+    STALL_RECONNECT_SEC,
+    heartbeat_loop,
+    serve_http,
+)
 from .instruments import InstrumentsPublisher, parse_instrument
 from .publisher import RedisPublisher
 from .quotex_client import QuotexFeedClient, SessionExpired, SessionRefused
 from .signals import SignalEngine
 
 SESSION_POLL_SEC = 3
+_SHUTDOWN_WAIT_SEC = 15
+_refresh_lock: asyncio.Lock | None = None
+
+
+def _session_refresh_lock() -> asyncio.Lock:
+    global _refresh_lock
+    if _refresh_lock is None:
+        _refresh_lock = asyncio.Lock()
+    return _refresh_lock
 
 
 def _env_path() -> Path:
@@ -105,7 +121,11 @@ async def _publish_health(publisher: RedisPublisher, health: Health) -> None:
 async def _try_auto_refresh(settings: Settings, health: Health) -> Settings | None:
     """Mint a fresh session by re-driving the saved (logged-in) browser profile
     on an invisible display. Returns refreshed Settings, or None if it couldn't
-    (e.g. the profile is logged out, or Playwright/Chrome unavailable)."""
+    (e.g. the profile is logged out, or Playwright/Chrome unavailable).
+
+    When QX_AUTO_LOGIN is on and credentials exist, also attempts to fill the
+    Quotex sign-in form if the profile lands on the login page.
+    """
     from .session_capture import capture_session, write_env_session
 
     profile = _profile_dir(settings)
@@ -115,10 +135,44 @@ async def _try_auto_refresh(settings: Settings, health: Health) -> Settings | No
             "once to log in.", profile,
         )
         return None
-    logger.info("Auto-refresh: driving the saved browser profile to mint a new session…")
-    result = await capture_session(profile, interactive=False, timeout=settings.capture_timeout)
+
+    can_auto_login = (
+        settings.auto_login
+        and bool(settings.email)
+        and settings.email != "you@example.com"
+        and bool(settings.password)
+        and settings.password != "change-me"
+    )
+    otp = os.getenv("QX_OTP", "").strip()
+    logger.info(
+        "Auto-refresh: driving the saved browser profile to mint a new session%s…",
+        " (auto-login enabled)" if can_auto_login else "",
+    )
+    health.recovering = True
+    try:
+        async with _session_refresh_lock():
+            result = await asyncio.wait_for(
+                capture_session(
+                    profile,
+                    interactive=False,
+                    timeout=settings.capture_timeout,
+                    email=settings.email if can_auto_login else None,
+                    password=settings.password if can_auto_login else None,
+                    otp=otp or None,
+                    auto_login=can_auto_login,
+                ),
+                timeout=settings.capture_timeout + 30,
+            )
+    except asyncio.TimeoutError:
+        logger.warning("Auto-refresh timed out after %ss", settings.capture_timeout + 30)
+        result = None
+    finally:
+        health.recovering = False
     if not result:
-        logger.warning("Auto-refresh attempt produced no session (profile logged out?).")
+        logger.warning(
+            "Auto-refresh attempt produced no session%s.",
+            " (profile logged out / Cloudflare / OTP?)" if can_auto_login else " (profile logged out?)",
+        )
         return None
     ssid, cookies, ua = result
     try:
@@ -142,6 +196,7 @@ async def _recover_session(
     so a manual `make capture` is picked up. Keeps the dashboard status current."""
     health.session_expired = True
     old = settings.ssid
+    refresh_failures = 0
     if settings.auto_refresh:
         logger.warning("Session expired — attempting automatic refresh (and watching .env).")
     else:
@@ -158,6 +213,22 @@ async def _recover_session(
             new = await _try_auto_refresh(settings, health)
             if new:
                 return new
+            refresh_failures += 1
+            # Back off on repeated Chrome failures so we don't hammer Xvfb/Chrome
+            # and starve the heartbeat path.
+            backoff = min(300, 15 * (2 ** min(refresh_failures - 1, 4)))
+            logger.warning("Auto-refresh failed; retrying in %ss (also watching .env).", backoff)
+            await _sleep_or_stop(backoff, stop)
+            # Still check .env after backoff.
+            ssid, cookies, ua = read_env_session()
+            if ssid and ssid != old:
+                new = _apply_env_session(ssid, cookies, ua)
+                if not new.problems:
+                    logger.info("Detected a refreshed session in .env — reconnecting.")
+                    health.session_expired = False
+                    return new
+                old = ssid
+            continue
 
         # Manual refresh: did backend/.env get a new SSID?
         ssid, cookies, ua = read_env_session()
@@ -170,9 +241,7 @@ async def _recover_session(
             logger.warning("Refreshed .env still has problems: %s", "; ".join(new.problems))
             old = ssid
 
-        # Poll .env often; auto-refresh already paces itself (the browser step
-        # takes many seconds), so a short sleep here is fine either way.
-        await _sleep_or_stop(SESSION_POLL_SEC if not settings.auto_refresh else 10, stop)
+        await _sleep_or_stop(SESSION_POLL_SEC, stop)
     return settings
 
 
@@ -196,6 +265,63 @@ async def _cooldown_throttle(
         await _sleep_or_stop(15, stop)
         waited += 15
     health.throttled = False
+
+
+async def _stall_watchdog(
+    health: Health, reconnect: asyncio.Event, stop: asyncio.Event
+) -> None:
+    """If Quotex stays connected but sends no ticks (partial throttle / dead
+    stream), force a reconnect instead of sitting in STALLED forever."""
+    stalled_since: float | None = None
+    while not stop.is_set() and not reconnect.is_set():
+        status = health.snapshot()["status"]
+        if status == "stalled":
+            now = time.time()
+            if stalled_since is None:
+                stalled_since = now
+            elif now - stalled_since >= STALL_RECONNECT_SEC:
+                gap = now - health.last_stall_reconnect_at
+                if gap < MIN_STALL_RECONNECT_GAP_SEC:
+                    # Still stalled, but too soon after last recovery attempt —
+                    # wait out the gap rather than thrashing Quotex.
+                    await _sleep_or_stop(5, stop)
+                    continue
+                logger.warning(
+                    "Feed stalled for ≥%ss with no fresh ticks — forcing reconnect",
+                    STALL_RECONNECT_SEC,
+                )
+                health.last_stall_reconnect_at = now
+                reconnect.set()
+                return
+        else:
+            stalled_since = None
+        await _sleep_or_stop(5, stop)
+
+
+async def _session_keep_alive(
+    live: dict, health: Health, stop: asyncio.Event
+) -> None:
+    """Mint a fresh SSID on a timer so we do not wait for authorization/reject.
+
+    Cannot stop Quotex from expiring tokens; this only replaces them early
+    while the Chrome profile is still logged in.
+    """
+    while not stop.is_set():
+        settings: Settings = live["settings"]
+        interval = int(settings.session_refresh_sec or 0)
+        if not settings.auto_refresh or interval <= 0:
+            await _sleep_or_stop(60, stop)
+            continue
+        await _sleep_or_stop(interval, stop)
+        if stop.is_set():
+            return
+        if health.session_expired or health.throttled or health.recovering or not health.connected:
+            continue
+        logger.info("Proactive session refresh (every %ss)…", interval)
+        new = await _try_auto_refresh(live["settings"], health)
+        if new:
+            live["settings"] = new
+            logger.info("Proactive session refresh succeeded")
 
 
 async def _asset_manager(
@@ -226,7 +352,7 @@ async def _asset_manager(
                     )
                     # Pace new subscriptions — a burst of dozens at once looks
                     # bot-like to Quotex's anti-abuse. Spread them out.
-                    await asyncio.sleep(0.4)
+                    await asyncio.sleep(0.75)
                 for asset in streamers.keys() - open_assets:
                     streamers.pop(asset).cancel()
 
@@ -250,44 +376,104 @@ async def run_service(settings: Settings) -> None:
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
+    # asyncio.add_signal_handler is unsupported on Windows (NotImplementedError).
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+    except (NotImplementedError, RuntimeError, AttributeError):
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, lambda *_: stop.set())
+            except (ValueError, OSError):
+                pass
+
+    live: dict = {"settings": settings}
 
     # Health publishing runs continuously, across reconnect cycles, so the
     # dashboard always reflects the current state (incl. 'session_expired').
     infra = [
         asyncio.create_task(_supervised("heartbeat", lambda: heartbeat_loop(health, publisher))),
         asyncio.create_task(_supervised("health-http", lambda: serve_http(health, settings.health_port))),
+        asyncio.create_task(_supervised(
+            "session-keepalive",
+            lambda: _session_keep_alive(live, health, stop),
+        )),
     ]
 
     while not stop.is_set():
+        settings = live["settings"]
         client = QuotexFeedClient(settings, health)
         try:
             await client.connect()
         except SessionExpired:
             await client.close()
             settings = await _recover_session(settings, health, publisher, stop)
+            live["settings"] = settings
             continue  # rebuild the client with the refreshed session
         except SessionRefused:
             await client.close()
             await _cooldown_throttle(settings, health, publisher, stop)
             continue  # quiet retry with the SAME session after the cooldown
         except ConnectionError as exc:
-            logger.error("Fatal connection error: %s", exc)
+            # WS 403 / transient transport failures used to exit the process,
+            # which left the dashboard OFFLINE until a manual restart (and could
+            # trip systemd start-rate limits). Treat them like throttle instead.
+            logger.error(
+                "Connection error (will cool down and retry, not exit): %s", exc,
+            )
             await client.close()
-            break
+            await _cooldown_throttle(settings, health, publisher, stop)
+            continue
         if stop.is_set():
             await client.close()
             break
 
         health.session_expired = False
+        health.recovering = False
+        health.grant_stall_grace()
         instruments = InstrumentsPublisher(
             client, publisher, health, settings.instruments_refresh_sec
         )
-        signal_engine = SignalEngine(publisher, publisher.get_candles)
+
+        warm_lock = asyncio.Lock()
+
+        async def warm_signal_candles(asset: str, tf: int, limit: int):
+            """Prefer Redis history; optionally top up from Quotex if thin."""
+            cached = await publisher.get_candles(asset, tf, limit)
+            if len(cached) >= min(limit, 35):
+                return cached
+            # Serialize history fetches — parallel warm across 40 assets times out.
+            async with warm_lock:
+                cached = await publisher.get_candles(asset, tf, limit)
+                if len(cached) >= min(limit, 35):
+                    return cached
+                try:
+                    remote = await client.get_candle_history(asset, int(tf), limit)
+                except Exception:
+                    logger.exception("Quotex candle warm failed for %s/%ss", asset, tf)
+                    return cached
+                if len(remote) <= len(cached):
+                    return cached
+                try:
+                    for c in remote:
+                        await publisher.push_candle(
+                            asset, int(tf), c, settings.candle_history_size
+                        )
+                except Exception:
+                    logger.exception("Redis candle backfill failed for %s/%ss", asset, tf)
+                return remote
+
+        signal_engine = SignalEngine(publisher, warm_signal_candles)
+        reconnect = asyncio.Event()
         stream_tasks = [
             asyncio.create_task(_supervised("watchdog", client.watchdog)),
             asyncio.create_task(_supervised("instruments", instruments.run)),
+            # Publishes M15 (and any delayed) signals once the 2–5 min window opens.
+            asyncio.create_task(_supervised("signal-notifier", signal_engine.run_notifier)),
+            asyncio.create_task(_supervised(
+                "stall-watchdog",
+                lambda: _stall_watchdog(health, reconnect, stop),
+            )),
         ]
         if settings.stream_all_open:
             stream_tasks.append(
@@ -313,22 +499,64 @@ async def run_service(settings: Settings) -> None:
             settings.auth_mode, scope, list(settings.timeframes),
         )
 
-        # Run until a stop signal or the session expires mid-run (watchdog fires).
+        # Run until stop, session expiry, throttle, or prolonged stall.
         expired_wait = asyncio.create_task(client._expired.wait())
+        refused_wait = asyncio.create_task(client._refused.wait())
         stop_wait = asyncio.create_task(stop.wait())
-        await asyncio.wait({expired_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED)
+        reconnect_wait = asyncio.create_task(reconnect.wait())
+        await asyncio.wait(
+            {expired_wait, refused_wait, stop_wait, reconnect_wait},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        was_refused = client._refused.is_set()
+        was_expired = client._expired.is_set()
         expired_wait.cancel()
+        refused_wait.cancel()
         stop_wait.cancel()
+        reconnect_wait.cancel()
 
         for t in stream_tasks:
             t.cancel()
-        await asyncio.gather(*stream_tasks, return_exceptions=True)
-        await client.close()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*stream_tasks, return_exceptions=True),
+                timeout=_SHUTDOWN_WAIT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out waiting for stream tasks to stop; continuing reconnect"
+            )
+        try:
+            await asyncio.wait_for(client.close(), timeout=8)
+        except Exception:
+            logger.warning("Timed out closing Quotex client; continuing")
 
         if stop.is_set():
             break
-        # Session expired mid-run — wait for a refresh, then loop to reconnect.
+        if reconnect.is_set():
+            health.reconnects += 1
+            logger.info("Stall recovery: reconnecting (will try session refresh if enabled)…")
+            # After a prolonged dead stream, mint a fresh session when possible —
+            # the same SSID often survives the TCP reconnect but loses live ticks.
+            if settings.auto_refresh or _profile_dir(settings).exists():
+                refreshed = await _try_auto_refresh(settings, health)
+                if refreshed is not None:
+                    settings = refreshed
+                    live["settings"] = settings
+            health.grant_stall_grace()
+            await _sleep_or_stop(10, stop)  # brief pause before reconnect storm
+            continue
+        if was_refused:
+            await _cooldown_throttle(settings, health, publisher, stop)
+            continue
+        if was_expired:
+            # Session expired mid-run — wait for a refresh, then loop to reconnect.
+            settings = await _recover_session(settings, health, publisher, stop)
+            live["settings"] = settings
+            continue
+        # Fallback: treat as expiry recovery.
         settings = await _recover_session(settings, health, publisher, stop)
+        live["settings"] = settings
 
     logger.info("Shutting down…")
     for t in infra:

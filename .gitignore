@@ -33,3 +33,6 @@ backend/.chrome-capture/
 
 # Redis persistence (local docker volume dir, if used)
 .redis-data/
+
+# User-uploaded avatars
+backend/uploads/

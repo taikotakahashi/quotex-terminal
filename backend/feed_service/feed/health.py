@@ -8,8 +8,11 @@ import time
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_SEC = 5
-STALE_TICK_SEC = 60
+HEARTBEAT_SEC = 2          # faster dashboard status / stall detection
+STALE_TICK_SEC = 45        # treat ticks older than this as stale
+STALL_RECONNECT_SEC = 120  # force full reconnect after prolonged dead stream
+STALL_GRACE_SEC = 90       # after reconnect, wait before declaring stalled again
+MIN_STALL_RECONNECT_GAP_SEC = 180  # avoid reconnect storms
 
 
 class Health:
@@ -23,6 +26,9 @@ class Health:
         self.instruments_refreshed_at = 0
         self.session_expired = False
         self.throttled = False
+        self.recovering = False
+        self.stall_grace_until = 0.0
+        self.last_stall_reconnect_at = 0.0
         self.last_tick: dict[str, float] = {a: 0.0 for a in assets}
 
     def note_tick(self, asset: str, ts: float) -> None:
@@ -31,6 +37,10 @@ class Health:
     def note_instruments(self, count: int) -> None:
         self.instruments_count = count
         self.instruments_refreshed_at = int(time.time())
+
+    def grant_stall_grace(self, sec: float = STALL_GRACE_SEC) -> None:
+        """After a reconnect, don't immediately re-enter stalled."""
+        self.stall_grace_until = time.time() + sec
 
     def snapshot(self) -> dict:
         now = time.time()
@@ -53,10 +63,15 @@ class Health:
             status = "throttled"
         elif self.session_expired:
             status = "session_expired"
+        elif self.recovering:
+            status = "disconnected"
         elif not self.connected:
             status = "disconnected"
         elif not fresh_any:
-            status = "stalled"          # connected but no live data flowing
+            if now < self.stall_grace_until:
+                status = "disconnected"  # warming after reconnect
+            else:
+                status = "stalled"          # connected but no live data flowing
         else:
             status = "ok"
         return {
@@ -64,6 +79,7 @@ class Health:
             "status": status,
             "session_expired": self.session_expired,
             "throttled": self.throttled,
+            "recovering": self.recovering,
             "connected": self.connected,
             "account_mode": self.account_mode,
             "balance": self.balance,

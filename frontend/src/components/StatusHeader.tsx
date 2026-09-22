@@ -1,52 +1,40 @@
 import type { Status } from '../types'
-import { fmtUptime } from '../util'
 import { useI18n } from '../i18n'
 import { useTheme } from '../theme'
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import {
+  alertsEnabled,
+  ensureNotifyPermission,
+  setAlertsEnabled,
+  unlockAudio,
+} from '../signalNotify'
+import { LangSwitch } from './LangSwitch'
+import { TelegramConnect } from './TelegramConnect'
+import { UserMenu } from './UserMenu'
 
 interface Props {
   status: Status | null
   wsConnected: boolean
+  /** When set, the wordmark links here (e.g. "/" from admin). */
+  logoHref?: string
+  /** Feed status strip (time / online / connected). Default true. */
+  showStatus?: boolean
+  /** Signal sound/push mute toggle. Default true. */
+  showAlerts?: boolean
 }
-
-function FlagUS() {
-  return (
-    <svg className="flag" viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg">
-      <rect width="20" height="14" fill="#b22234" />
-      <g fill="#fff">
-        {[1, 3, 5, 7, 9, 11].map((i) => (
-          <rect key={i} y={i * (14 / 13)} width="20" height={14 / 13} />
-        ))}
-      </g>
-      <rect width="8.4" height={(14 / 13) * 7} fill="#3c3b6e" />
-      <g fill="#fff">
-        {[1.4, 4.2, 7].flatMap((cy) =>
-          [1, 2.9, 4.8, 6.7].map((cx) => <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r="0.5" />),
-        )}
-      </g>
-    </svg>
-  )
-}
-
-function FlagBR() {
-  return (
-    <svg className="flag" viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg">
-      <rect width="20" height="14" fill="#009c3b" />
-      <polygon points="10,1.6 18,7 10,12.4 2,7" fill="#ffdf00" />
-      <circle cx="10" cy="7" r="3.1" fill="#002776" />
-      <path d="M7.1 6.35 A3.8 3.8 0 0 1 12.9 7.5" stroke="#fff" strokeWidth="0.7" fill="none" />
-    </svg>
-  )
-}
-
-const FLAGS = { en: FlagUS, pt: FlagBR }
-const FLAG_LABEL = { en: 'English', pt: 'Português (Brasil)' }
 
 function ThemeToggle() {
   const { theme, toggle } = useTheme()
   return (
-    <button className="theme-toggle" onClick={toggle} title={theme === 'dark' ? 'Light mode' : 'Dark mode'} aria-label="Toggle theme">
+    <button
+      className="theme-toggle"
+      onClick={toggle}
+      title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+      aria-label="Toggle theme"
+    >
       {theme === 'dark' ? (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <circle cx="12" cy="12" r="4" />
           <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
         </svg>
@@ -59,72 +47,107 @@ function ThemeToggle() {
   )
 }
 
-function Logo() {
-  return <img className="wordmark" src="/quotex_logo.svg" alt="Quotex" />
-}
+function AlertsToggle() {
+  const { t } = useI18n()
+  const [on, setOn] = useState(() => alertsEnabled())
 
-export function StatusHeader({ status, wsConnected }: Props) {
-  const { t, lang, setLang } = useI18n()
-  const live = !!status?.connected && status.feed_status === 'ok'
-  const badge = !wsConnected
-    ? { cls: 'off', text: 'OFFLINE' }
-    : live
-      ? { cls: 'live', text: 'LIVE' }
-      : { cls: 'warn', text: (status?.feed_status || 'offline').toUpperCase() }
+  async function toggle() {
+    const next = !on
+    setAlertsEnabled(next)
+    setOn(next)
+    if (next) {
+      await unlockAudio()
+      await ensureNotifyPermission()
+    }
+  }
 
   return (
-    <header className="header">
-      <div className="header-bar">
-        <div className="brand">
-          <Logo />
-          <div className="brand-text">
-            <span className={`badge ${badge.cls}`}>
-              <span className="pip" />
-              {badge.text}
-            </span>
-            <span className="sub">{t('brand_sub')}</span>
-          </div>
-        </div>
-
-        <div className="controls">
-          <div className="lang-switch">
-            {(['en', 'pt'] as const).map((l) => {
-              const Flag = FLAGS[l]
-              return (
-                <button
-                  key={l}
-                  className={l === lang ? 'on' : ''}
-                  onClick={() => setLang(l)}
-                  title={FLAG_LABEL[l]}
-                  aria-label={FLAG_LABEL[l]}
-                >
-                  <Flag />
-                </button>
-              )
-            })}
-          </div>
-          <ThemeToggle />
-        </div>
-      </div>
-
-      <div className="metrics">
-        <Metric label={t('account')} value={status?.account_mode ?? '—'} />
-        <Metric label={t('assets_open')} value={status ? `${status.open_count}/${status.asset_count}` : '—'} />
-        <Metric label={t('uptime')} value={fmtUptime(status?.uptime_sec)} />
-        <Metric
-          label={t('catalog_age')}
-          value={status?.instruments_age_sec != null ? `${status.instruments_age_sec}s` : '—'}
-        />
-      </div>
-    </header>
+    <button
+      className={`alerts-toggle ${on ? 'on' : 'off'}`}
+      onClick={() => {
+        void toggle()
+      }}
+      title={on ? t('alerts_on') : t('alerts_off')}
+      aria-label={on ? t('alerts_on') : t('alerts_off')}
+      aria-pressed={on}
+    >
+      {on ? (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5" />
+          <path d="M9 17a3 3 0 0 0 6 0" />
+        </svg>
+      ) : (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 0 0-1.2-3.6" />
+          <path d="M6.7 6.7A6 6 0 0 0 6 11v3.2a2 2 0 0 1-.6 1.4L4 17h11" />
+          <path d="M9 17a3 3 0 0 0 4.9 2.3" />
+          <path d="M3 3l18 18" />
+        </svg>
+      )}
+    </button>
   )
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+export function StatusHeader({
+  status,
+  wsConnected,
+  logoHref,
+  showStatus = true,
+  showAlerts = true,
+}: Props) {
+  const { t } = useI18n()
+  const [clock, setClock] = useState(() =>
+    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  )
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setClock(
+        new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      )
+    }, 250)
+    return () => window.clearInterval(id)
+  }, [])
+  const live = !!status?.connected && status.feed_status === 'ok'
+  const connected = !!wsConnected && live
+
+  const logo = <img className="wordmark" src="/quotex_logo.svg" alt="Quotex" />
+
   return (
-    <div className="metric">
-      <span className="metric-value">{value}</span>
-      <span className="metric-label">{label}</span>
-    </div>
+    <header className="header dash-header">
+      <div className="header-left">
+        {logoHref ? (
+          <Link to={logoHref} className="header-logo-link" title="Signals dashboard">
+            {logo}
+          </Link>
+        ) : (
+          logo
+        )}
+      </div>
+
+      <div className="header-right">
+        {showStatus && (
+          <div className="header-status">
+            <span>
+              {t('local_time')} <strong>{clock}</strong>
+            </span>
+            <span className={connected ? 'on' : 'off'}>
+              <i className="header-status-pip" aria-hidden />
+              {connected ? t('system_online') : t('system_offline')}
+            </span>
+            <span className={connected ? 'on' : 'off'}>
+              <i className="header-status-pip" aria-hidden />
+              {connected ? t('system_connected') : t('system_disconnected')}
+            </span>
+          </div>
+        )}
+        <div className="controls">
+          <LangSwitch />
+          {showAlerts && <AlertsToggle />}
+          <TelegramConnect variant="header" />
+          <ThemeToggle />
+          <UserMenu />
+        </div>
+      </div>
+    </header>
   )
 }

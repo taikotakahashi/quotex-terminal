@@ -1,0 +1,21 @@
+[Unit]
+Description=Quotex Telegram notification bot
+After=network-online.target redis-server.service postgresql.service quotex-api.service
+Wants=network-online.target redis-server.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=quotex
+Group=quotex
+WorkingDirectory=/opt/quotex/quotex-terminal
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/quotex/quotex-terminal/backend/web_api:/opt/quotex/quotex-terminal/backend/telegram_bot
+EnvironmentFile=-/opt/quotex/quotex-terminal/backend/.env
+ExecStart=/opt/quotex/quotex-terminal/.venv/bin/quotex-telegram
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -36,8 +36,20 @@ class RedisPublisher:
     async def publish_json(self, channel: str, payload: dict[str, Any]) -> None:
         await self._redis.publish(channel, json.dumps(payload))
 
-    async def set_json(self, key: str, payload: Any) -> None:
-        await self._redis.set(key, json.dumps(payload))
+    async def set_json(self, key: str, payload: Any, ttl: int | None = None) -> None:
+        if ttl is not None and ttl > 0:
+            await self._redis.set(key, json.dumps(payload), ex=int(ttl))
+        else:
+            await self._redis.set(key, json.dumps(payload))
+
+    async def delete(self, key: str) -> None:
+        await self._redis.delete(key)
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        keys: list[str] = []
+        async for key in self._redis.scan_iter(match=pattern, count=200):
+            keys.append(key)
+        return keys
 
     async def get_json(self, key: str) -> Any | None:
         raw = await self._redis.get(key)

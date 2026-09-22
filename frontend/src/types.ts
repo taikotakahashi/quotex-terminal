@@ -66,14 +66,20 @@ export interface Signal {
   reasons: string[]
   schedule_start: number
   entry_start: number
+  /** Unix seconds when the signal was/should be shown (2–5 min before entry). */
+  notify_at?: number
+  /** Seconds from analysis to entry (may be >300 for M15 before notify). */
+  lead_sec?: number
   current_price: number
   indicators: Indicators
   generated_at: number
+  published_at?: number
 }
 
 export interface SignalResult {
   asset: string
   timeframe: number
+  /** Unix seconds — trade candle open (entry), not close. */
   time: number
   direction: 'CALL' | 'PUT'
   confidence: number

@@ -1,0 +1,23 @@
+---
+description: Leftover client sketch items and Quotex session limits — implement only if the client asks
+alwaysApply: true
+---
+
+# Client signal board — not yet requested
+
+The live product is a **full dashboard** with a 4-step signal card (analyze → arrived → in trade → result). The client’s sketch at senalessingale.com/master-winn-oficial-2 is a **single focused board**. Do **not** build these unless they explicitly ask:
+
+- Strip the dashboard down to only the sketch page (drop chart, assets, indicators, active signals)
+- Rebrand to “IA TRADER SINAIS”
+- Put signal history **inside** the signal card (it is a panel below, same columns)
+- Mix M1/M5/M15 in one history table (history is scoped to the chosen operation time)
+
+**Now requested / shipped:** sound + browser notification when a signal arrives (user can mute in the header).
+
+Market filter (Moedas / Cripto / Commodities / Índices) scopes the signal card, active signals, and history. Default is **currency (Moedas)**. Keep that unless they ask to change it.
+
+Keep: signals-only (no auto-trade), confidence ≠ win-rate, user picks M1/M5/M15, Portuguese flow copy.
+
+# Session expiry
+
+Quotex **will** expire SSID/cookies. We cannot keep one token forever. Recover by Chrome auto-refresh (`QX_AUTO_REFRESH` + `.chrome-capture` profile that stays **logged in**). Do not switch to email/password login unless they provide credentials and accept Cloudflare/OTP failures on a VPS.

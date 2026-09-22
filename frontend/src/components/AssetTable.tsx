@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Asset } from '../types'
-import { num, payoutClass } from '../util'
+import { MARKETS, num, payoutClass } from '../util'
 import { useI18n } from '../i18n'
+import { AssetIcon } from './AssetIcon'
 
 interface Props {
   assets: Asset[]
   prices: Record<string, number>
   selected: string
   onSelect: (symbol: string) => void
+  activeSymbols?: string[]
+  category: string
+  onCategoryChange: (category: string) => void
 }
 
 /** Price cell that briefly flashes green/red when the value ticks. */
@@ -27,25 +31,37 @@ function PriceCell({ value, streamed }: { value?: number; streamed?: boolean }) 
 
   return (
     <td className="num price-cell">
-      {streamed && <span className="live-tag">●</span>}
-      <span className={`price ${flash}`}>{value != null ? value : streamed ? '…' : '—'}</span>
+      {streamed && value != null && <span className="live-pip" title="Live" aria-hidden />}
+      <span className={`price ${flash}`}>{value != null ? value : '—'}</span>
     </td>
   )
 }
 
-export function AssetTable({ assets, prices, selected, onSelect }: Props) {
+export function AssetTable({
+  assets,
+  prices,
+  selected,
+  onSelect,
+  activeSymbols = [],
+  category,
+  onCategoryChange,
+}: Props) {
   const { t } = useI18n()
+  const activeSet = useMemo(() => new Set(activeSymbols), [activeSymbols])
   const [q, setQ] = useState('')
   const [openOnly, setOpenOnly] = useState(true)
   const [minPayout, setMinPayout] = useState(0)
-  const [category, setCategory] = useState('')
 
   const catLabel = (a: Asset) => (a.is_otc ? 'OTC' : t(`cat_${a.category}`))
 
-  const categories = useMemo(
-    () => Array.from(new Set(assets.map((a) => a.category))).sort(),
-    [assets],
-  )
+  const categories = useMemo(() => {
+    const present = new Set(assets.map((a) => a.category))
+    const ordered: string[] = MARKETS.filter((c) => present.has(c))
+    for (const c of present) {
+      if (!ordered.includes(c)) ordered.push(c)
+    }
+    return ordered
+  }, [assets])
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -68,9 +84,9 @@ export function AssetTable({ assets, prices, selected, onSelect }: Props) {
   }, [assets, q, openOnly, minPayout, category])
 
   return (
-    <section className="panel table-panel">
+    <section className="panel table-panel dash-card" id="assets">
       <div className="panel-head">
-        <h2>{t('assets')} · <span className="hl">{t('live_payouts')}</span></h2>
+        <h2>{t('assets')} - {t('live_payouts')}</h2>
         <span className="count">{rows.length}</span>
       </div>
 
@@ -81,7 +97,11 @@ export function AssetTable({ assets, prices, selected, onSelect }: Props) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <select value={category} onChange={(e) => setCategory(e.target.value)}>
+        <select
+          value={category}
+          onChange={(e) => onCategoryChange(e.target.value)}
+          aria-label={t('all_types')}
+        >
           <option value="">{t('all_types')}</option>
           {categories.map((c) => (
             <option key={c} value={c}>
@@ -125,8 +145,16 @@ export function AssetTable({ assets, prices, selected, onSelect }: Props) {
                 onClick={() => onSelect(a.symbol)}
               >
                 <td>
-                  <div className="asset-name">{a.name}</div>
-                  <div className="asset-sym">{a.symbol}</div>
+                  <div className="asset-cell">
+                    <AssetIcon symbol={a.symbol} name={a.name} size="sm" />
+                    <div className="asset-text">
+                      <div className="asset-name">
+                        {a.name}
+                        {activeSet.has(a.symbol) && <span className="sig-live-pip" title={t('active_signals')} />}
+                      </div>
+                      <div className="asset-sym">{a.symbol}</div>
+                    </div>
+                  </div>
                 </td>
                 <td>
                   <span className="cat">{catLabel(a)}</span>

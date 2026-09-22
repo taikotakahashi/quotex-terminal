@@ -7,8 +7,10 @@ Description=Quotex feed service
 After=network-online.target redis-server.service
 Wants=network-online.target
 # Start-rate limiting belongs in [Unit] (newer systemd warns if put in [Service]).
-StartLimitIntervalSec=600
-StartLimitBurst=5
+# Softened: the feed self-heals and should rarely exit; allow more recoveries
+# before systemd gives up (prevents "stuck OFFLINE until manual restart").
+StartLimitIntervalSec=1200
+StartLimitBurst=15
 
 [Service]
 Type=simple
@@ -16,14 +18,17 @@ User=quotex
 Group=quotex
 # WorkingDirectory MUST be backend/ so it loads backend/.env and finds
 # backend/.chrome-capture (the auto-refresh browser profile).
-WorkingDirectory=/opt/quotex/backend
-ExecStart=/opt/quotex/.venv/bin/quotex-feed
+WorkingDirectory=/opt/quotex/quotex-terminal/backend
+ExecStart=/opt/quotex/quotex-terminal/.venv/bin/quotex-feed
 Environment=PYTHONUNBUFFERED=1
 # The feed self-heals (cools down on throttle, auto-refreshes on expiry), so it
 # rarely exits; Restart is only a backstop. Keep it gentle to avoid hammering
 # Quotex with reconnect storms.
 Restart=always
-RestartSec=30
+RestartSec=20
+# If stop/reconnect hangs (dead websocket), SIGKILL so Restart can bring it back.
+TimeoutStopSec=25
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

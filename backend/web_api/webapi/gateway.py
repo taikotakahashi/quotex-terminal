@@ -13,8 +13,10 @@ from typing import Any, AsyncIterator
 import redis.asyncio as aioredis
 
 # If the feed's last heartbeat is older than this, treat it as not live even
-# though the snapshot persists in Redis (the feed heartbeats every ~5s).
-HEALTH_STALE_SEC = 20
+# though the snapshot persists in Redis (the feed heartbeats every ~2s).
+# Keep this generous so brief Chrome auto-refresh / reconnect work does not
+# flash the dashboard as OFFLINE.
+HEALTH_STALE_SEC = 90
 
 
 def _num(v: Any) -> Any:
@@ -48,8 +50,13 @@ class RedisGateway:
                     "detail": "feed service not publishing"}
         ts = health.get("ts")
         if ts and (time.time() - ts) > HEALTH_STALE_SEC:
-            health = {**health, "status": "offline", "connected": False,
-                      "detail": f"feed heartbeat is {int(time.time() - ts)}s old"}
+            # Prefer preserving session/throttle/recovery context over a blank
+            # offline overwrite — the feed is often mid-refresh, not dead.
+            if health.get("session_expired") or health.get("throttled") or health.get("recovering"):
+                health = {**health, "heartbeat_stale": True, "connected": False}
+            else:
+                health = {**health, "status": "offline", "connected": False,
+                          "detail": f"feed heartbeat is {int(time.time() - ts)}s old"}
         health.pop("balance", None)  # never expose the account balance
         return health
 
@@ -95,11 +102,57 @@ class RedisGateway:
         return await self._get_json(f"feed:tick:{asset}")
 
     async def get_signal(self, asset: str, timeframe: int) -> dict | None:
-        return await self._get_json(f"feed:signal:{asset}:{timeframe}")
+        sig = await self._get_json(f"feed:signal:{asset}:{timeframe}")
+        return sig if self._signal_is_live(sig) else None
+
+    async def get_indicators(self, asset: str, timeframe: int) -> dict | None:
+        return await self._get_json(f"feed:indicators:{asset}:{timeframe}")
+
+    async def list_active_signals(self) -> list[dict]:
+        import time
+
+        now = time.time()
+        out: list[dict] = []
+        async for key in self._r.scan_iter(match="feed:signal:*", count=200):
+            sig = await self._get_json(key)
+            if self._signal_is_live(sig, now=now):
+                out.append(sig)  # type: ignore[arg-type]
+        out.sort(key=lambda s: (int(s.get("entry_start") or 0), str(s.get("asset") or "")))
+        return out
+
+    @staticmethod
+    def _signal_is_live(sig: dict | None, now: float | None = None) -> bool:
+        if not isinstance(sig, dict):
+            return False
+        try:
+            entry = float(sig.get("entry_start") or 0)
+            tf = float(sig.get("timeframe") or 0)
+        except (TypeError, ValueError):
+            return False
+        if entry <= 0 or tf <= 0:
+            return False
+        t = time.time() if now is None else now
+        return t < entry + tf
 
     async def get_signal_history(self, asset: str, timeframe: int, limit: int) -> list[dict]:
         raw = await self._r.lrange(f"feed:signal_history:{asset}:{timeframe}", 0, limit - 1)
         return [json.loads(x) for x in raw]  # newest first
+
+    async def get_recent_signal_history(self, timeframe: int, limit: int) -> list[dict]:
+        """Newest scored signals across every asset for one operation time."""
+        rows: list[dict] = []
+        match = f"feed:signal_history:*:{int(timeframe)}"
+        async for key in self._r.scan_iter(match=match, count=200):
+            raw = await self._r.lrange(key, 0, max(limit - 1, 0))
+            for item in raw:
+                try:
+                    rec = json.loads(item)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    rows.append(rec)
+        rows.sort(key=lambda r: int(r.get("time") or 0), reverse=True)
+        return rows[:limit]
 
     # ---- live events -----------------------------------------------------
     async def events(self) -> AsyncIterator[dict[str, Any]]:

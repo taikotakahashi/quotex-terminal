@@ -130,8 +130,11 @@ class QuotexFeedClient:
         self.qx.set_account_mode("PRACTICE")
         self._subscribed: set[str] = set()
         self._reconnect_lock = asyncio.Lock()
+        self._subscribe_lock = asyncio.Lock()
+        self._last_subscribe_at = 0.0
         # Set when the session is rejected mid-run; the service loop watches it.
         self._expired = asyncio.Event()
+        self._refused = asyncio.Event()
 
     @staticmethod
     async def _respect_connect_floor() -> None:
@@ -233,6 +236,9 @@ class QuotexFeedClient:
             async with self._reconnect_lock:
                 logger.warning("Session lost — reconnecting")
                 self.health.reconnects += 1
+                # Drop subscription bookkeeping so CandleStreamers re-subscribe
+                # after the new socket is up (internal WS reconnects lose streams).
+                self._subscribed.clear()
                 try:
                     await self.connect()
                 except SessionExpired:
@@ -241,6 +247,19 @@ class QuotexFeedClient:
                     self.health.session_expired = True
                     self._expired.set()
                     while True:  # stop reconnecting; the service loop tears us down
+                        await asyncio.sleep(3600)
+                except SessionRefused:
+                    self.health.throttled = True
+                    self._refused.set()
+                    while True:
+                        await asyncio.sleep(3600)
+                except ConnectionError as exc:
+                    # WS 403 / transport errors: cool down via the service loop
+                    # instead of crashing the supervised watchdog every 5s.
+                    logger.error("Watchdog reconnect failed: %s", exc)
+                    self.health.throttled = True
+                    self._refused.set()
+                    while True:
                         await asyncio.sleep(3600)
                 try:
                     await self.qx.re_subscribe_stream()
@@ -252,18 +271,72 @@ class QuotexFeedClient:
     async def get_instruments(self) -> list:
         return await self.qx.get_instruments()
 
-    async def subscribe_asset(self, asset: str) -> None:
-        if asset in self._subscribed:
+    def forget_subscription(self, asset: str) -> None:
+        self._subscribed.discard(asset)
+
+    def forget_all_subscriptions(self) -> None:
+        self._subscribed.clear()
+
+    async def subscribe_asset(self, asset: str, *, force: bool = False) -> None:
+        if asset in self._subscribed and not force:
             return
-        await self.qx.start_candles_stream(asset, period=60)
-        self._subscribed.add(asset)
+        # Pace subscriptions process-wide — mass parallel re-subs look bot-like
+        # and often trigger Quotex partial throttle (connected, no ticks).
+        async with self._subscribe_lock:
+            gap = 0.6 - (time.monotonic() - self._last_subscribe_at)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            await self.qx.start_candles_stream(asset, period=60)
+            self._last_subscribe_at = time.monotonic()
+            self._subscribed.add(asset)
 
     async def get_ticks(self, asset: str) -> list[dict]:
         """Recent ticks as [{'time': unix_ts, 'price': float}, ...]."""
         return await self.qx.get_realtime_price(asset)
 
+    async def get_candle_history(
+        self, asset: str, period: int, limit: int
+    ) -> list[dict]:
+        """Fetch recent closed candles from Quotex (oldest first).
+
+        One request only — Quotex often returns a short window and parallel
+        multi-batch warm-ups across many assets cause timeouts.
+        """
+        period = int(period)
+        limit = max(1, int(limit))
+        offset = period * min(199, max(limit, 40))
+        raw = await self.qx.get_candles(asset, time.time(), offset, period, timeout=12)
+        if not raw:
+            return []
+        out: list[dict] = []
+        for c in raw:
+            if not isinstance(c, dict):
+                continue
+            close = c.get("close")
+            if close is None:
+                continue
+            start = c.get("time") or c.get("timestamp") or c.get("start_time") or c.get("from")
+            item = {
+                "asset": asset,
+                "timeframe": period,
+                "close": float(close),
+                "open": float(c["open"]) if c.get("open") is not None else float(close),
+                "high": float(c["high"]) if c.get("high") is not None else float(close),
+                "low": float(c["low"]) if c.get("low") is not None else float(close),
+            }
+            if start is not None:
+                try:
+                    item["start"] = int(start)
+                    item["end"] = int(start) + period
+                except (TypeError, ValueError):
+                    pass
+            out.append(item)
+        if out and "start" in out[0]:
+            out.sort(key=lambda x: int(x.get("start") or 0))
+        return out[-limit:]
+
     async def close(self) -> None:
         try:
-            await self.qx.close()
+            await asyncio.wait_for(self.qx.close(), timeout=8)
         except Exception:
             pass

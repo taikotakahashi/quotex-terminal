@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart quotex-feed if its health heartbeat is frozen
+After=quotex-feed.service redis-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/quotex/quotex-terminal/deploy/systemd/quotex-feed-watchdog.sh

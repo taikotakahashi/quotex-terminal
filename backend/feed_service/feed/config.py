@@ -85,8 +85,14 @@ class Settings:
     # saved (logged-in) browser profile on an invisible display. Requires a
     # one-time `make capture` login first.
     auto_refresh: bool = False
+    # When the Chrome profile is logged out, fill QUOTEX_EMAIL/PASSWORD on the
+    # Quotex sign-in page (best-effort; Cloudflare/OTP may still block).
+    auto_login: bool = False
     chrome_profile: str = ""
     capture_timeout: int = 90
+    # While connected, mint a fresh SSID this often (seconds). 0 disables.
+    # Quotex still expires sessions; this refreshes before the reject when possible.
+    session_refresh_sec: int = 10800
     # When Quotex throttles the account (refuses to authorize), wait this long
     # before a single quiet retry — retrying fast only prolongs the block.
     throttle_cooldown: int = 1200
@@ -232,8 +238,10 @@ class Settings:
             proxy=proxy,
             impersonate=os.getenv("QX_IMPERSONATE", "chrome").strip() or "chrome",
             auto_refresh=os.getenv("QX_AUTO_REFRESH", "").strip().lower() in ("1", "true", "yes", "on"),
+            auto_login=os.getenv("QX_AUTO_LOGIN", "").strip().lower() in ("1", "true", "yes", "on"),
             chrome_profile=os.getenv("QX_CHROME_PROFILE", "").strip(),
             capture_timeout=_int("QX_CAPTURE_TIMEOUT", 90, 20, 600),
+            session_refresh_sec=_int("QX_SESSION_REFRESH_SEC", 10800, 0, 86400),
             throttle_cooldown=_int("QX_THROTTLE_COOLDOWN", 1200, 60, 7200),
             problems=tuple(problems),
         )
