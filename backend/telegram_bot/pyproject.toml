@@ -9,6 +9,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
+    # Windows ships without IANA zoneinfo; ZoneInfo("America/Sao_Paulo") needs this.
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]

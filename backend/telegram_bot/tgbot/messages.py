@@ -7,7 +7,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 # Entry clock shown to users (product audience is primarily Brazil).
-_ENTRY_TZ = ZoneInfo("America/Sao_Paulo")
+# On Windows, install the `tzdata` package (see pyproject) so IANA zones resolve.
+try:
+    _ENTRY_TZ = ZoneInfo("America/Sao_Paulo")
+except Exception:  # ZoneInfoNotFoundError on bare Windows without tzdata
+    from datetime import timezone, timedelta
+
+    _ENTRY_TZ = timezone(timedelta(hours=-3))  # UTC-3 ≈ São Paulo (no DST since 2019)
 
 TF_LABEL = {60: "M1", 300: "M5", 900: "M15"}
 

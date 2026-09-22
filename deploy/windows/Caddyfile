@@ -1,0 +1,18 @@
+# masterwinn.com — Windows VPS Caddyfile
+# Serves the dashboard + proxies /api and /ws to quotex-api.
+# Requires DNS A records pointing to this server before HTTPS will work.
+
+masterwinn.com, www.masterwinn.com {
+	encode gzip
+
+	@backend path /api/* /ws /uploads/*
+	handle @backend {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * C:/quotex/quotex-terminal/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

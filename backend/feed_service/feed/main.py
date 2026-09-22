@@ -129,13 +129,6 @@ async def _try_auto_refresh(settings: Settings, health: Health) -> Settings | No
     from .session_capture import capture_session, write_env_session
 
     profile = _profile_dir(settings)
-    if not profile.exists():
-        logger.warning(
-            "Auto-refresh: no saved browser profile at %s — run `make capture` "
-            "once to log in.", profile,
-        )
-        return None
-
     can_auto_login = (
         settings.auto_login
         and bool(settings.email)
@@ -143,6 +136,20 @@ async def _try_auto_refresh(settings: Settings, health: Health) -> Settings | No
         and bool(settings.password)
         and settings.password != "change-me"
     )
+    if not profile.exists():
+        if not can_auto_login:
+            logger.warning(
+                "Auto-refresh: no saved browser profile at %s — run `make capture` "
+                "once to log in (or enable QX_AUTO_LOGIN with credentials).",
+                profile,
+            )
+            return None
+        # First-time Windows/VPS bootstrap: create an empty profile and sign in.
+        profile.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Auto-refresh: no browser profile yet — creating %s and auto-logging in…",
+            profile,
+        )
     otp = os.getenv("QX_OTP", "").strip()
     logger.info(
         "Auto-refresh: driving the saved browser profile to mint a new session%s…",
